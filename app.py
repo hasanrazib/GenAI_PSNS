@@ -1,8 +1,10 @@
 import streamlit as st
 import os
 from dotenv import load_dotenv
+import fitz  # PyMuPDF
+from PIL import Image
 
-# --- ইম্পোর্ট ---
+# --- LangChain ইম্পোর্ট ---
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -13,27 +15,36 @@ from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-st.set_page_config(page_title="PSNS: Study Notes", page_icon="📚")
+st.set_page_config(page_title="PSNS: Study Notes", page_icon="📚", layout="wide")
 st.title("📚 Personal Study Notes Searcher")
 
+# API Key চেক
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     st.error("⚠️ API Key পাওয়া যায়নি!")
     st.stop()
 
+# সেশন স্টেট (মেমোরি)
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
+if "uploaded_file_path" not in st.session_state:
+    st.session_state.uploaded_file_path = None
 
-# --- ১. আপলোড সেকশন (আগের মতোই) ---
+# --- ১. আপলোড সেকশন ---
 uploaded_file = st.file_uploader("লেকচার স্লাইড (PDF) আপলোড করো", type=['pdf'])
 
 if uploaded_file:
+    # টেম্প ফোল্ডার চেক
     if not os.path.exists("temp_files"):
         os.makedirs("temp_files")
     
+    # ফাইল সেভ করা
     file_path = os.path.join("temp_files", uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+    
+    # ফাইল পাথ সেশনে রাখা
+    st.session_state.uploaded_file_path = file_path
 
     if st.button("🧠 প্রসেস শুরু করুন"):
         with st.spinner("ব্রেইন তৈরি হচ্ছে..."):
@@ -54,15 +65,14 @@ if uploaded_file:
                 st.error(f"Error: {e}")
 
 st.write("---")
-# --- ২. প্রশ্ন ও উত্তর সেকশন (Fixed Version) ---
+
+# --- ২. প্রশ্ন ও উত্তর সেকশন ---
 user_question = st.text_input("প্রশ্ন করো:")
 
 if user_question and st.session_state.vector_store:
     
-    # A. রিট্রিভার তৈরি
     retriever = st.session_state.vector_store.as_retriever()
     
-    # B. উত্তর জেনারেট করার টেমপ্লেট
     template = """Answer the question based ONLY on the following context:
     {context}
     
@@ -71,42 +81,47 @@ if user_question and st.session_state.vector_store:
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
 
-    with st.spinner("উত্তর খুঁজছি এবং সোর্স বের করছি..."):
+    with st.spinner("উত্তর খুঁজছি..."):
         try:
-            # ধাপ ১: আগে ডকুমেন্টগুলো (Chunks) খুঁজে বের করি
+            # A. ডকুমেন্ট খোঁজা
             relevant_docs = retriever.invoke(user_question)
             
-            # ধাপ ২: ডকুমেন্টগুলোকে টেক্সটে কনভার্ট করি (Manual Formatting)
-            # আমরা এখানে সরাসরি Python List Comprehension ব্যবহার করছি, যা অনেক সেফ
+            # B. টেক্সট বানানো
             context_text = "\n\n".join([d.page_content for d in relevant_docs])
             
-            # ধাপ ৩: AI-এর জন্য প্রম্পট রেডি করা
+            # C. উত্তর জেনারেট
             formatted_prompt = prompt.invoke({"context": context_text, "question": user_question})
-            
-            # ধাপ ৪: উত্তর জেনারেট করা
             response = llm.invoke(formatted_prompt)
             
-            # আউটপুট দেখানো
-            st.success("উত্তর:")
-            st.write(response.content) # .content দিলে শুধু টেক্সট আসবে
+            # D. উত্তর দেখানো
+            st.success("🤖 AI উত্তর:")
+            st.write(response.content)
             
-            # ধাপ ৫: সোর্স দেখানো (Page Numbers)
-            st.warning("📌 রেফারেন্স (Sources):")
+            # E. সোর্স এবং ছবি দেখানো (লুকানো অবস্থায় থাকবে)
+            st.markdown("---")
+            st.subheader("📌 রেফারেন্স (প্রয়োজন হলে ক্লিক করে দেখুন):")
             
+            # ইউনিক পেজ নম্বর বের করা
             unique_pages = set()
             for doc in relevant_docs:
-                # পেজ নম্বর চেক করা (যদি না থাকে তবে 0 ধরবে)
-                page_num = doc.metadata.get('page', 0) + 1
+                page_num = doc.metadata.get('page', 0)
                 unique_pages.add(page_num)
             
-            for page in sorted(unique_pages):
-                st.write(f"📄 তথ্যটি **Page {page}** থেকে নেওয়া হয়েছে।")
+            if st.session_state.uploaded_file_path:
+                pdf_doc = fitz.open(st.session_state.uploaded_file_path)
                 
-            # ডিবাগিং (অপশনাল)
-            with st.expander("🔍 বিস্তারিত সোর্স টেক্সট দেখুন"):
-                for i, doc in enumerate(relevant_docs):
-                    st.caption(f"Source {i+1} (Page {doc.metadata.get('page', 0) + 1})")
-                    st.text(doc.page_content[:200] + "...")
+                cols = st.columns(len(unique_pages))
+                
+                for idx, page_num in enumerate(sorted(unique_pages)):
+                    # CHANGE HERE: expanded=False করে দেওয়া হয়েছে
+                    with st.expander(f"📄 Page {page_num + 1} (Click to View Slide)", expanded=False):
+                        st.info(f"Source: Page {page_num + 1}")
+                        
+                        page = pdf_doc.load_page(page_num)
+                        pix = page.get_pixmap(dpi=150)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        
+                        st.image(img, caption=f"Slide Page: {page_num + 1}", use_container_width=True)
 
         except Exception as e:
             st.error(f"Error: {e}")
