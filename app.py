@@ -11,22 +11,34 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 
 load_dotenv()
 
+# ==========================================
+# ⚙️ CONFIGURATION FOR PROFESSOR
+# ==========================================
+# Set this to True to enable Local Llama 3 (Requires Ollama running)
+# Set this to False to use OpenAI GPT-4o (Default, Stable)
+ENABLE_LOCAL_MODE = False 
+# ==========================================
+
 # --- OCR Configuration ---
-# Tesseract Configuration
 if platform.system() == "Windows":
-    # Windows-এর জন্য লোকাল পাথ
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 else:
-    # Docker/Linux-এর জন্য ডিফল্ট পাথ
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 st.set_page_config(page_title="PSNS: Study Notes", page_icon="📚", layout="wide")
 st.title("📚 PSNS: Personal Study Notes Searcher")
+
+# Show current mode
+if ENABLE_LOCAL_MODE:
+    st.markdown("### 🟢 Mode: **Local Llama 3 (Privacy Focused)**")
+else:
+    st.markdown("### 🔵 Mode: **OpenAI GPT-4o (High Speed)**")
 
 # API Key Check
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -34,15 +46,16 @@ if not openai_api_key:
     st.error("⚠️ API Key not found! Please check your .env file.")
     st.stop()
 
-# Session State
+# --- Session State Initialization ---
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
-# আগে ছিল শুধু একটা পাথ, এখন হবে পাথ-এর ডিকশনারি {filename: filepath}
 if "file_paths" not in st.session_state:
     st.session_state.file_paths = {}
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# --- 1. Upload Section (Multiple Files Support) ---
-# accept_multiple_files=True যোগ করা হয়েছে
+# --- 1. Upload Section (FIXED VIEW) ---
+st.markdown("#### 📂 Upload Documents")
 uploaded_files = st.file_uploader("Upload Lecture Slides (PDF) or Note Images", 
                                   type=['pdf', 'png', 'jpg', 'jpeg'], 
                                   accept_multiple_files=True)
@@ -50,31 +63,26 @@ uploaded_files = st.file_uploader("Upload Lecture Slides (PDF) or Note Images",
 if uploaded_files:
     if st.button("🧠 Start Processing All Files"):
         
-        # Check/Create temp folder
         if not os.path.exists("temp_files"):
             os.makedirs("temp_files")
             
         all_documents = []
-        st.session_state.file_paths = {} # Reset paths
+        st.session_state.file_paths = {} 
         
-        with st.spinner("Processing all files... This may take a moment."):
+        with st.spinner("Processing files..."):
             try:
-                # Loop through each uploaded file
                 for uploaded_file in uploaded_files:
-                    
                     # Save file locally
                     file_path = os.path.join("temp_files", uploaded_file.name)
                     with open(file_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
-                    # Store path in session state (FileName -> FilePath)
                     st.session_state.file_paths[uploaded_file.name] = file_path
                     
                     # --- A. PDF Processing ---
                     if uploaded_file.type == "application/pdf":
                         loader = PyPDFLoader(file_path)
                         docs = loader.load()
-                        # Add source metadata just to be safe
                         for doc in docs:
                             doc.metadata['source'] = uploaded_file.name
                         all_documents.extend(docs)
@@ -85,14 +93,13 @@ if uploaded_files:
                         extracted_text = pytesseract.image_to_string(image)
                         
                         if extracted_text.strip():
-                            # Create a document object manually
                             doc = Document(page_content=extracted_text, 
                                            metadata={"page": 0, "source": uploaded_file.name})
                             all_documents.append(doc)
                 
-                # --- Chunking & Embedding (Common for all files) ---
+                # --- Chunking & Embedding ---
                 if all_documents:
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
                     chunks = text_splitter.split_documents(all_documents)
                     
                     embeddings = OpenAIEmbeddings()
@@ -108,13 +115,28 @@ if uploaded_files:
 
 st.write("---")
 
-# --- 2. Q&A Section ---
-user_question = st.text_input("Ask a question from your notes:")
+# --- 2. Q&A Section (Modern Chat UI) ---
 
-if user_question and st.session_state.vector_store:
+# Display Chat History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat Input Field
+if user_question := st.chat_input("💬 Ask a question from your notes..."):
     
-    # k=10 for better summary
-    retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 10})
+    # 1. User Message Show
+    st.session_state.messages.append({"role": "user", "content": user_question})
+    with st.chat_message("user"):
+        st.markdown(user_question)
+
+    # 2. Check if DB exists
+    if not st.session_state.vector_store:
+        st.warning("⚠️ Please upload and process files first!")
+        st.stop()
+
+    # 3. Model Setup
+    retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 2})
     
     template = """You are an advanced university assistant.
     Answer the question based ONLY on the following context.
@@ -126,62 +148,61 @@ if user_question and st.session_state.vector_store:
     Question: {question}
     """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
 
-    with st.spinner("Searching across all files..."):
-        try:
-            relevant_docs = retriever.invoke(user_question)
-            context_text = "\n\n".join([d.page_content for d in relevant_docs])
-            
-            formatted_prompt = prompt.invoke({"context": context_text, "question": user_question})
-            response = llm.invoke(formatted_prompt)
-            
-            st.success("🤖 AI Answer:")
-            st.write(response.content)
-            
-            # --- Source Verification (Multi-file Support) ---
-            st.markdown("---")
-            st.subheader("📌 References & Source Slides:")
-            
-            # We need to group pages by source file
-            # Example: {'Lecture1.pdf': {1, 5}, 'Note.jpg': {0}}
-            sources_map = {}
-            for doc in relevant_docs:
-                source_name = doc.metadata.get('source')
-                page_num = doc.metadata.get('page', 0)
+    if ENABLE_LOCAL_MODE:
+        llm = ChatOllama(model="llama3", temperature=0, base_url="http://127.0.0.1:11434")
+        model_name_display = "Local Llama 3"
+    else:
+        llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
+        model_name_display = "OpenAI GPT-4o"
+
+    # 4. Generate Answer
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        
+        with st.spinner(f"Thinking using {model_name_display}..."):
+            try:
+                relevant_docs = retriever.invoke(user_question)
+                context_text = "\n\n".join([d.page_content for d in relevant_docs])
                 
-                if source_name not in sources_map:
-                    sources_map[source_name] = set()
-                sources_map[source_name].add(page_num)
-            
-            # Display images/slides based on source
-            for source_name, pages in sources_map.items():
+                formatted_prompt = prompt.invoke({"context": context_text, "question": user_question})
+                response = llm.invoke(formatted_prompt)
                 
-                # Get local path from session state
-                file_path = st.session_state.file_paths.get(source_name)
+                # Show Text Response
+                st.markdown(response.content)
+                st.session_state.messages.append({"role": "assistant", "content": response.content})
                 
-                if file_path:
-                    st.markdown(f"**📂 Source File: `{source_name}`**")
+                # Show Sources (Images) in Expander
+                with st.expander("📌 View Source Slides & References", expanded=False):
+                    sources_map = {}
+                    for doc in relevant_docs:
+                        source_name = doc.metadata.get('source')
+                        page_num = doc.metadata.get('page', 0)
+                        if source_name not in sources_map:
+                            sources_map[source_name] = set()
+                        sources_map[source_name].add(page_num)
                     
-                    # If it's a PDF
-                    if source_name.lower().endswith('.pdf'):
-                        pdf_doc = fitz.open(file_path)
-                        cols = st.columns(len(pages))
-                        for idx, page_num in enumerate(sorted(pages)):
-                            with st.expander(f"📄 Page {page_num + 1}", expanded=False):
-                                page = pdf_doc.load_page(page_num)
-                                pix = page.get_pixmap(dpi=150)
-                                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                                st.image(img, caption=f"Page {page_num + 1}", use_container_width=True)
-                    
-                    # If it's an Image
-                    else:
-                        with st.expander("📷 Original Image", expanded=False):
-                            img = Image.open(file_path)
-                            st.image(img, caption="Source Note", use_container_width=True)
+                    for source_name, pages in sources_map.items():
+                        file_path = st.session_state.file_paths.get(source_name)
+                        if file_path:
+                            st.markdown(f"**📄 Source: `{source_name}`**")
+                            if source_name.lower().endswith('.pdf'):
+                                try:
+                                    pdf_doc = fitz.open(file_path)
+                                    cols = st.columns(len(pages)) # Dynamic columns
+                                    for idx, page_num in enumerate(sorted(pages)[:3]):
+                                        with cols[idx]: # কলামের মধ্যে ইমেজ বসবে
+                                            page = pdf_doc.load_page(page_num)
+                                            # 🔥 FIX: DPI 200 (High Quality)
+                                            pix = page.get_pixmap(dpi=200) 
+                                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                            # 🔥 FIX: use_container_width=True (Full width, Clear view)
+                                            st.image(img, caption=f"Page {page_num + 1}", use_container_width=True)
+                                except:
+                                    pass
+                            else:
+                                img = Image.open(file_path)
+                                st.image(img, caption="Source Image", use_container_width=True)
 
-        except Exception as e:
-            st.error(f"Error generating answer: {e}")
-
-elif user_question and not st.session_state.vector_store:
-    st.warning("⚠️ Please upload and process files first!")
+            except Exception as e:
+                st.error(f"Error: {e}")
