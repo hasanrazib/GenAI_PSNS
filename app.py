@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import fitz  # PyMuPDF
 from PIL import Image
 import pytesseract
+import platform
 
 # --- LangChain Imports ---
 from langchain_community.document_loaders import PyPDFLoader
@@ -16,8 +17,13 @@ from langchain_core.documents import Document
 load_dotenv()
 
 # --- OCR Configuration ---
-# Your Tesseract Path (Update if needed)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Tesseract Configuration
+if platform.system() == "Windows":
+    # Windows-এর জন্য লোকাল পাথ
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+else:
+    # Docker/Linux-এর জন্য ডিফল্ট পাথ
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 st.set_page_config(page_title="PSNS: Study Notes", page_icon="📚", layout="wide")
 st.title("📚 PSNS: Personal Study Notes Searcher")

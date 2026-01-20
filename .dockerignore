@@ -1,0 +1,6 @@
+venv/
+.git/
+__pycache__/
+temp_files/
+Report.pdf
+*.zip
