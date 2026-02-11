@@ -1,10 +1,6 @@
 # 📚 PSNS: Personal Study Notes Searcher
 
-**Course:** Generative AI (194.207) - TU Wien  
-**Group:** 181  
-**Members:** Al-Mamun Abdullah | Hasan Razib
 
----
 
 ## 📖 Project Overview
 
